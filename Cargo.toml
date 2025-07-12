@@ -1,0 +1,15 @@
+[package]
+name = "bildsak"
+version = "0.1.0"
+edition = "2024"
+
+
+
+[dependencies]
+eframe = {version = "0.32.0", features = ["default"]}
+egui = "0.32.0"
+egui_extras = { version = "0.32.0", features = ["default","image"] }
+env_logger = { version = "0.11.8", features = ["auto-color", "humantime"] }
+image = { version = "0.25.6", features = ["default", "png", "jpeg"] }
+log = "0.4.27"
+rfd = "0.15.4"
