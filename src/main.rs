@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window in release mode (Windows only - Linux GUI apps don't show console by default)
 
 use std::{
-    collections::HashMap,
     ffi::OsString,
     fs::DirEntry
 };
@@ -34,14 +33,11 @@ struct FileSysNode {
 
 #[derive(Default)]
 struct MyApp {
-    working_index: usize,
     working_path: Option<OsString>,
     images: Option<Box<FileSysNode>>,
     image_paths: Vec<std::path::PathBuf>, // All images in traversal order
     kept_images: Vec<std::path::PathBuf>,
-    discarded_images: Vec<std::path::PathBuf>,
-    // Image preloading cache
-    image_cache: HashMap<usize, Vec<u8>>, // index -> image bytes
+    discarded_count: usize,
     is_loading: bool,
 }
 
@@ -111,53 +107,6 @@ impl FileSysNode {
 }
 
 impl MyApp {
-    fn preload_images(&mut self) {
-        // Preload the next 10 images starting from current index
-        let start_index = self.working_index;
-        let end_index = (start_index + 10).min(self.image_paths.len());
-        
-        for i in start_index..end_index {
-            // Only load if not already cached
-            if !self.image_cache.contains_key(&i) {
-                if let Ok(image_bytes) = std::fs::read(&self.image_paths[i]) {
-                    self.image_cache.insert(i, image_bytes);
-                }
-            }
-        }
-        
-        // Aggressively remove images that are outside our cache window
-        // Keep only images in range [current_index - 5, current_index + 15]
-        let cache_start = self.working_index.saturating_sub(5);
-        let cache_end = (self.working_index + 15).min(self.image_paths.len());
-        
-        let indices_to_remove: Vec<usize> = self.image_cache
-            .keys()
-            .filter(|&&k| k < cache_start || k >= cache_end)
-            .copied()
-            .collect();
-            
-        for index in indices_to_remove {
-            self.image_cache.remove(&index);
-        }
-    }
-    
-    fn get_image_bytes(&self, index: usize) -> Option<&Vec<u8>> {
-        self.image_cache.get(&index)
-    }
-    
-    fn preload_batch_initial(&mut self) {
-        // More conservative initial batch - only preload first 5 images
-        let end_index = 5.min(self.image_paths.len());
-        
-        for i in 0..end_index {
-            if !self.image_cache.contains_key(&i) {
-                if let Ok(image_bytes) = std::fs::read(&self.image_paths[i]) {
-                    self.image_cache.insert(i, image_bytes);
-                }
-            }
-        }
-    }
-    
     fn copy_kept_images(&self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(working_path) = &self.working_path {
             let working_path = std::path::PathBuf::from(working_path);
@@ -258,16 +207,12 @@ impl eframe::App for MyApp {
                     // Populate the image paths in correct traversal order
                     self.image_paths = root_node.get_images_depth_first_current_priority(&path);
                     
-                    self.working_index = 0;
                     self.kept_images.clear();
-                    self.discarded_images.clear();
-                    self.image_cache.clear();
+                    self.discarded_count = 0;
                     self.is_loading = true;
                     
                     self.images = Some(Box::new(root_node));
                     
-                    // Start aggressive preloading of the first batch of images
-                    self.preload_batch_initial();
                     self.is_loading = false;
                 }
             }
@@ -281,7 +226,7 @@ impl eframe::App for MyApp {
                 // Display information about found images
                 if let Some(images_node) = &self.images {
                     let total_images = images_node.count_images();
-                    ui.label(format!("Total images found: {}", total_images));
+                    ui.label(format!("Total images found: {} (Current queue: {})", total_images, self.image_paths.len()));
                     
                 }
             }
@@ -294,37 +239,39 @@ impl eframe::App for MyApp {
                 ctx.input(|i| {
                     if i.key_pressed(egui::Key::ArrowRight) {
                         // Keep current image and move to next
-                        if self.working_index < self.image_paths.len() {
-                            self.kept_images.push(self.image_paths[self.working_index].clone());
-                            self.image_cache.remove(&self.working_index);
-                            self.working_index += 1;
+                        if !self.image_paths.is_empty() {
+                            self.kept_images.push(self.image_paths.remove(0));
                             advanced = true;
                         }
                     }
                     if i.key_pressed(egui::Key::ArrowLeft) {
                         // Discard current image and move to next
-                        if self.working_index < self.image_paths.len() {
-                            self.discarded_images.push(self.image_paths[self.working_index].clone());
-                            self.image_cache.remove(&self.working_index);
-                            self.working_index += 1;
+                        if !self.image_paths.is_empty() {
+                            self.image_paths.remove(0);
+                            self.discarded_count += 1;
                             advanced = true;
                         }
                     }
                 });
 
-                // Trigger preloading after input handling
+                // Trigger repaint after input handling
                 if advanced {
-                    self.preload_images();
                     ctx.request_repaint(); // Immediate repaint for responsiveness
                 }
 
                 // Current image display
-                if self.working_index < self.image_paths.len() {
-                    let current_image_path = &self.image_paths[self.working_index];
+                if !self.image_paths.is_empty() {
+                    let current_image_path = &self.image_paths[0];
                     
-                    // Progress bar
-                    let progress = (self.working_index as f32) / (self.image_paths.len() as f32);
-                    ui.add(egui::ProgressBar::new(progress).text(format!("{} / {}", self.working_index + 1, self.image_paths.len())));
+                    // Progress bar - calculate based on total processed vs original total
+                    let total_processed = self.kept_images.len() + self.discarded_count;
+                    let original_total = total_processed + self.image_paths.len();
+                    let progress = if original_total > 0 { 
+                        total_processed as f32 / original_total as f32 
+                    } else { 
+                        0.0 
+                    };
+                    ui.add(egui::ProgressBar::new(progress).text(format!("{} / {}", total_processed, original_total)));
                     
                     ui.horizontal(|ui| {
                         ui.label("📷 Current image:");
@@ -335,31 +282,20 @@ impl eframe::App for MyApp {
                     ui.horizontal(|ui| {
                         ui.label(format!("✅ Kept: {}", self.kept_images.len()));
                         ui.separator();
-                        ui.label(format!("❌ Discarded: {}", self.discarded_images.len()));
+                        ui.label(format!("❌ Discarded: {}", self.discarded_count));
                         ui.separator();
-                        ui.label(format!("📁 Remaining: {}", self.image_paths.len() - self.working_index));
-                        ui.separator();
-                        ui.label(format!("🔄 Cached: {}", self.image_cache.len()));
+                        ui.label(format!("📁 Remaining: {}", self.image_paths.len()));
                     });
 
                     ui.separator();
 
-                    // Get image bytes first (outside closures to avoid borrowing issues)
-                    let cached_bytes = self.get_image_bytes(self.working_index);
+                    // Get image bytes (load on demand)
                     let current_image_path_clone = current_image_path.clone();
                     
-                    // Load image if not cached
-                    let image_bytes = if cached_bytes.is_some() {
-                        cached_bytes.cloned()
-                    } else {
-                        match std::fs::read(&current_image_path_clone) {
-                            Ok(bytes) => {
-                                // Cache this image for future use
-                                self.image_cache.insert(self.working_index, bytes.clone());
-                                Some(bytes)
-                            },
-                            Err(_) => None
-                        }
+                    // Load image directly when needed
+                    let image_bytes = match std::fs::read(&current_image_path_clone) {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => None
                     };
 
                     // Button click state
@@ -396,8 +332,8 @@ impl eframe::App for MyApp {
                         // Now use all remaining space for the image
                         ui.vertical_centered(|ui| {
                             if let Some(bytes) = &image_bytes {
-                                // Use all available remaining space for the image
-                                let bytes_uri = format!("bytes://image_{}", self.working_index);
+                                // Use a unique URI based on the image path to avoid caching issues
+                                let bytes_uri = format!("bytes://{}", current_image_path.display());
                                 ui.add(
                                     egui::Image::from_bytes(bytes_uri, bytes.clone())
                                         .max_height(ui.available_height())
@@ -419,15 +355,13 @@ impl eframe::App for MyApp {
                     
                     // Handle the action after the UI
                     if should_advance {
-                        let current_index = self.working_index;
                         if keep_image {
                             self.kept_images.push(current_image_path_clone);
                         } else {
-                            self.discarded_images.push(current_image_path_clone);
+                            self.discarded_count += 1;
                         }
-                        self.image_cache.remove(&current_index);
-                        self.working_index += 1;
-                        self.preload_images();
+                        // Remove the processed image from the vector
+                        self.image_paths.remove(0);
                         ctx.request_repaint(); // Immediate repaint for responsiveness
                     }
 
@@ -436,7 +370,7 @@ impl eframe::App for MyApp {
                     ui.label("🎉 All images processed!");
                     ui.horizontal(|ui| {
                         ui.label(format!("Kept: {}", self.kept_images.len()));
-                        ui.label(format!("Discarded: {}", self.discarded_images.len()));
+                        ui.label(format!("Discarded: {}", self.discarded_count));
                     });
                     
                     ui.add_space(10.0);
@@ -460,12 +394,14 @@ impl eframe::App for MyApp {
                         }
                         
                         if ui.button("🔄 Reset").clicked() {
-                            self.working_index = 0;
+                            // Rebuild image paths from the filesystem tree
+                            if let (Some(images_node), Some(working_path)) = (&self.images, &self.working_path) {
+                                let path = std::path::PathBuf::from(working_path);
+                                self.image_paths = images_node.get_images_depth_first_current_priority(&path);
+                            }
+                            
                             self.kept_images.clear();
-                            self.discarded_images.clear();
-                            self.image_cache.clear();
-                            // Restart preloading from the beginning
-                            self.preload_images();
+                            self.discarded_count = 0;
                         }
                     });
                 }
