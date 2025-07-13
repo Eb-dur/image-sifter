@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window in release mode (Windows only - Linux GUI apps don't show console by default)
 
 use std::{
     collections::HashMap,
@@ -112,7 +112,7 @@ impl FileSysNode {
 
 impl MyApp {
     fn preload_images(&mut self) {
-        // Preload the next 10 images starting from current index (increased from 5)
+        // Preload the next 10 images starting from current index
         let start_index = self.working_index;
         let end_index = (start_index + 10).min(self.image_paths.len());
         
@@ -125,10 +125,14 @@ impl MyApp {
             }
         }
         
-        // Keep more images in cache for better performance (20 instead of 10)
+        // Aggressively remove images that are outside our cache window
+        // Keep only images in range [current_index - 5, current_index + 15]
+        let cache_start = self.working_index.saturating_sub(5);
+        let cache_end = (self.working_index + 15).min(self.image_paths.len());
+        
         let indices_to_remove: Vec<usize> = self.image_cache
             .keys()
-            .filter(|&&k| k < start_index.saturating_sub(10) || k >= end_index + 10)
+            .filter(|&&k| k < cache_start || k >= cache_end)
             .copied()
             .collect();
             
@@ -142,8 +146,8 @@ impl MyApp {
     }
     
     fn preload_batch_initial(&mut self) {
-        // Aggressively preload a larger batch at startup
-        let end_index = 15.min(self.image_paths.len());
+        // More conservative initial batch - only preload first 5 images
+        let end_index = 5.min(self.image_paths.len());
         
         for i in 0..end_index {
             if !self.image_cache.contains_key(&i) {
@@ -292,6 +296,7 @@ impl eframe::App for MyApp {
                         // Keep current image and move to next
                         if self.working_index < self.image_paths.len() {
                             self.kept_images.push(self.image_paths[self.working_index].clone());
+                            self.image_cache.remove(&self.working_index);
                             self.working_index += 1;
                             advanced = true;
                         }
@@ -300,6 +305,7 @@ impl eframe::App for MyApp {
                         // Discard current image and move to next
                         if self.working_index < self.image_paths.len() {
                             self.discarded_images.push(self.image_paths[self.working_index].clone());
+                            self.image_cache.remove(&self.working_index);
                             self.working_index += 1;
                             advanced = true;
                         }
@@ -413,11 +419,13 @@ impl eframe::App for MyApp {
                     
                     // Handle the action after the UI
                     if should_advance {
+                        let current_index = self.working_index;
                         if keep_image {
                             self.kept_images.push(current_image_path_clone);
                         } else {
                             self.discarded_images.push(current_image_path_clone);
                         }
+                        self.image_cache.remove(&current_index);
                         self.working_index += 1;
                         self.preload_images();
                         ctx.request_repaint(); // Immediate repaint for responsiveness
