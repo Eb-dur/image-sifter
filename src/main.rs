@@ -39,6 +39,7 @@ struct MyApp {
     kept_images: Vec<std::path::PathBuf>,
     discarded_count: usize,
     is_loading: bool,
+    image_counter: u64, // Counter to make unique image URIs
 }
 
 
@@ -209,6 +210,7 @@ impl eframe::App for MyApp {
                     
                     self.kept_images.clear();
                     self.discarded_count = 0;
+                    self.image_counter = 0;
                     self.is_loading = true;
                     
                     self.images = Some(Box::new(root_node));
@@ -235,29 +237,27 @@ impl eframe::App for MyApp {
             if !self.image_paths.is_empty() {
                 
                 // Handle keyboard input
-                let mut advanced = false;
+                let mut should_advance = false;
+                let mut keep_image = false;
+                
                 ctx.input(|i| {
                     if i.key_pressed(egui::Key::ArrowRight) {
                         // Keep current image and move to next
                         if !self.image_paths.is_empty() {
-                            self.kept_images.push(self.image_paths.remove(0));
-                            advanced = true;
+                            should_advance = true;
+                            keep_image = true;
                         }
                     }
                     if i.key_pressed(egui::Key::ArrowLeft) {
                         // Discard current image and move to next
                         if !self.image_paths.is_empty() {
-                            self.image_paths.remove(0);
-                            self.discarded_count += 1;
-                            advanced = true;
+                            should_advance = true;
+                            keep_image = false;
                         }
                     }
                 });
 
-                // Trigger repaint after input handling
-                if advanced {
-                    ctx.request_repaint(); // Immediate repaint for responsiveness
-                }
+
 
                 // Current image display
                 if !self.image_paths.is_empty() {
@@ -298,9 +298,9 @@ impl eframe::App for MyApp {
                         Err(_) => None
                     };
 
-                    // Button click state
-                    let mut should_advance = false;
-                    let mut keep_image = false;
+                    // Button click state (also used for keyboard input)
+                    // let mut should_advance = false;  // Already declared above for keyboard
+                    // let mut keep_image = false;      // Already declared above for keyboard
                     
                     // Use bottom-up layout to reserve space for buttons first
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -332,8 +332,8 @@ impl eframe::App for MyApp {
                         // Now use all remaining space for the image
                         ui.vertical_centered(|ui| {
                             if let Some(bytes) = &image_bytes {
-                                // Use a unique URI based on the image path to avoid caching issues
-                                let bytes_uri = format!("bytes://{}", current_image_path.display());
+                                // Use a unique URI with counter to avoid caching issues
+                                let bytes_uri = format!("bytes://{}/{}", self.image_counter, current_image_path.display());
                                 ui.add(
                                     egui::Image::from_bytes(bytes_uri, bytes.clone())
                                         .max_height(ui.available_height())
@@ -356,12 +356,17 @@ impl eframe::App for MyApp {
                     // Handle the action after the UI
                     if should_advance {
                         if keep_image {
-                            self.kept_images.push(current_image_path_clone);
+                            self.kept_images.push(current_image_path_clone.clone());
                         } else {
                             self.discarded_count += 1;
                         }
+                        
                         // Remove the processed image from the vector
                         self.image_paths.remove(0);
+                        
+                        // Increment counter for next unique URI
+                        self.image_counter += 1;
+                        
                         ctx.request_repaint(); // Immediate repaint for responsiveness
                     }
 
@@ -402,6 +407,7 @@ impl eframe::App for MyApp {
                             
                             self.kept_images.clear();
                             self.discarded_count = 0;
+                            self.image_counter = 0;
                         }
                     });
                 }
