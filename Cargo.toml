@@ -11,5 +11,6 @@ egui = "0.32.0"
 egui_extras = { version = "0.32.0", features = ["default","image"] }
 env_logger = { version = "0.11.8", features = ["auto-color", "humantime"] }
 image = { version = "0.25.6", features = ["default", "png", "jpeg"] }
+jpeg-decoder = "0.3.2"
 log = "0.4.27"
 rfd = "0.15.4"

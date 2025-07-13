@@ -40,6 +40,7 @@ struct MyApp {
     discarded_count: usize,
     is_loading: bool,
     image_counter: u64, // Counter to make unique image URIs
+    texture: Option<egui::TextureHandle>, // Holds the current image texture
 }
 
 
@@ -291,12 +292,78 @@ impl eframe::App for MyApp {
 
                     // Get image bytes (load on demand)
                     let current_image_path_clone = current_image_path.clone();
-                    
-                    // Load image directly when needed
-                    let image_bytes = match std::fs::read(&current_image_path_clone) {
-                        Ok(bytes) => Some(bytes),
-                        Err(_) => None
-                    };
+                    let bytes_uri = format!("bytes://{}/{}", self.image_counter, current_image_path.display());
+                    let mut create_texture = false;
+                    if self.texture.is_none() {
+                        create_texture = true;
+                    }
+                    if create_texture {
+                        let extension = current_image_path_clone.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase());
+                        let image_bytes = match std::fs::read(&current_image_path_clone) {
+                            Ok(bytes) => Some(bytes),
+                            Err(_) => None
+                        };
+                        if let Some(bytes) = &image_bytes {
+                            let color_image = if let Some(ext) = &extension {
+                                if ext == "jpg" || ext == "jpeg" {
+                                    // Use jpeg-decoder for JPEGs
+                                    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+                                    match decoder.decode() {
+                                        Ok(decoded) => {
+                                            if let Some(info) = decoder.info() {
+                                                let width = info.width as usize;
+                                                let height = info.height as usize;
+                                                let pixels: Vec<egui::Color32> = decoded
+                                                    .chunks(3)
+                                                    .map(|chunk| egui::Color32::from_rgb(chunk[0], chunk[1], chunk[2]))
+                                                    .collect();
+                                                egui::ColorImage {
+                                                    size: [width, height],
+                                                    source_size: egui::Vec2::new(width as f32, height as f32),
+                                                    pixels,
+                                                }
+                                            } else {
+                                                egui::ColorImage {
+                                                    size: [1, 1],
+                                                    source_size: egui::Vec2::new(1.0, 1.0),
+                                                    pixels: vec![egui::Color32::BLACK],
+                                                }
+                                            }
+                                        },
+                                        Err(_) => egui::ColorImage {
+                                            size: [1, 1],
+                                            source_size: egui::Vec2::new(1.0, 1.0),
+                                            pixels: vec![egui::Color32::BLACK],
+                                        },
+                                    }
+                                } else {
+                                    // Use image crate for other formats
+                                    match image::load_from_memory(bytes) {
+                                        Ok(img) => {
+                                            let rgba = img.to_rgba8();
+                                            let size = [rgba.width() as usize, rgba.height() as usize];
+                                            let pixels = rgba.into_raw();
+                                            egui::ColorImage::from_rgba_unmultiplied(size, &pixels)
+                                        },
+                                        Err(_) => egui::ColorImage {
+                                            size: [1, 1],
+                                            source_size: egui::Vec2::new(1.0, 1.0),
+                                            pixels: vec![egui::Color32::BLACK],
+                                        },
+                                    }
+                                }
+                            } else {
+                                egui::ColorImage {
+                                    size: [1, 1],
+                                    source_size: egui::Vec2::new(1.0, 1.0),
+                                    pixels: vec![egui::Color32::BLACK],
+                                }
+                            };
+                            self.texture = Some(ctx.load_texture(bytes_uri.clone(), color_image, egui::TextureOptions::default()));
+                        } else {
+                            self.texture = None;
+                        }
+                    }
 
                     // Button click state (also used for keyboard input)
                     // let mut should_advance = false;  // Already declared above for keyboard
@@ -331,20 +398,15 @@ impl eframe::App for MyApp {
                         
                         // Now use all remaining space for the image
                         ui.vertical_centered(|ui| {
-                            if let Some(bytes) = &image_bytes {
-                                // Use a unique URI with counter to avoid caching issues
-                                let bytes_uri = format!("bytes://{}/{}", self.image_counter, current_image_path.display());
+                            if let Some(texture) = &self.texture {
                                 ui.add(
-                                    egui::Image::from_bytes(bytes_uri, bytes.clone())
-                                        .max_height(ui.available_height())
-                                        .max_width(ui.available_width() - 20.0) // Small margin
+                                    egui::Image::new(texture)
                                         .fit_to_exact_size(egui::Vec2::new(
                                             ui.available_width() - 20.0,
                                             ui.available_height()
                                         ))
                                 );
                             } else {
-                                // Show loading indicator or error
                                 ui.horizontal(|ui| {
                                     ui.spinner();
                                     ui.label("Loading image...");
@@ -360,14 +422,11 @@ impl eframe::App for MyApp {
                         } else {
                             self.discarded_count += 1;
                         }
-                        
-                        // Remove the processed image from the vector
                         self.image_paths.remove(0);
-                        
-                        // Increment counter for next unique URI
+                        // Drop the previous texture
+                        self.texture = None;
                         self.image_counter += 1;
-                        
-                        ctx.request_repaint(); // Immediate repaint for responsiveness
+                        ctx.request_repaint();
                     }
 
                 } else {
