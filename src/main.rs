@@ -6,6 +6,7 @@ use std::{
 };
 
 use eframe::egui;
+use serde::{Serialize, Deserialize};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -43,6 +44,13 @@ struct MyApp {
     texture: Option<egui::TextureHandle>, // Holds the current image texture
 }
 
+#[derive(Serialize, Deserialize, Default)]
+struct ProgressData {
+    kept_images: Vec<String>,
+    discarded_count: usize,
+    image_counter: u64,
+    remaining_queue: Vec<String>,
+}
 
 fn insert_children(parent: &mut FileSysNode, dir_entry: &DirEntry) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(entries) = dir_entry.path().read_dir() {
@@ -156,81 +164,157 @@ impl MyApp {
         }
         Ok(())
     }
+
+    fn save_progress(&self) {
+        if let Some(working_path) = &self.working_path {
+            let progress = ProgressData {
+                kept_images: self.kept_images.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+                discarded_count: self.discarded_count,
+                image_counter: self.image_counter,
+                remaining_queue: self.image_paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            };
+            let file_path = std::path::PathBuf::from(working_path).join("bildsak_progress.json");
+            if let Ok(json) = serde_json::to_string_pretty(&progress) {
+                let _ = std::fs::write(file_path, json);
+            }
+        }
+    }
+
+    fn load_progress(&mut self, working_path: &std::path::Path) {
+        let file_path = working_path.join("bildsak_progress.json");
+        if let Ok(json) = std::fs::read_to_string(&file_path) {
+            if let Ok(progress) = serde_json::from_str::<ProgressData>(&json) {
+                self.kept_images = progress.kept_images.iter().map(|s| std::path::PathBuf::from(s)).collect();
+                self.discarded_count = progress.discarded_count;
+                self.image_counter = progress.image_counter;
+                self.image_paths = progress.remaining_queue.iter().map(|s| std::path::PathBuf::from(s)).collect();
+            }
+        }
+    }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.button("Select working folder").clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.working_path = Some(path.as_os_str().to_os_string());
-                    
-                    // Create the root node
-                    let mut root_node = FileSysNode {
-                        name: path.as_os_str().to_os_string(),
-                        ..FileSysNode::default()
-                    };
+            ui.horizontal(|ui| {
+                if ui.button("Select working folder").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.working_path = Some(path.as_os_str().to_os_string());
+                        
+                        // Create the root node
+                        let mut root_node = FileSysNode {
+                            name: path.as_os_str().to_os_string(),
+                            ..FileSysNode::default()
+                        };
 
-                    // Create a DirEntry-like structure for the root path
-                    if let Ok(entries) = path.read_dir() {
-                        for entry in entries {
-                            if let Ok(entry) = entry {
-                                if let Ok(metadata) = entry.metadata() {
-                                    if metadata.is_dir() {
-                                        // Create child node and recursively populate it
-                                        let mut child_node = FileSysNode {
-                                            name: entry.file_name(),
-                                            ..FileSysNode::default()
-                                        };
-                                        
-                                        if let Err(_e) = insert_children(&mut child_node, &entry) {
-                                            // Silently ignore directory processing errors
-                                        }
-                                        
-                                        root_node.children.push(Box::new(child_node));
-                                    } else {
-                                        // Check if it's an image file before adding to root
-                                        if let Some(extension) = entry.path().extension() {
-                                            if let Some(ext_str) = extension.to_str() {
-                                                let ext_lower = ext_str.to_lowercase();
-                                                if matches!(ext_lower.as_str(), "jpg" | "jpeg") {
-                                                    root_node.images.push(entry.file_name());
+                        // Create a DirEntry-like structure for the root path
+                        if let Ok(entries) = path.read_dir() {
+                            for entry in entries {
+                                if let Ok(entry) = entry {
+                                    if let Ok(metadata) = entry.metadata() {
+                                        if metadata.is_dir() {
+                                            // Create child node and recursively populate it
+                                            let mut child_node = FileSysNode {
+                                                name: entry.file_name(),
+                                                ..FileSysNode::default()
+                                            };
+                                            
+                                            if let Err(_e) = insert_children(&mut child_node, &entry) {
+                                                // Silently ignore directory processing errors
+                                            }
+                                            
+                                            root_node.children.push(Box::new(child_node));
+                                        } else {
+                                            // Check if it's an image file before adding to root
+                                            if let Some(extension) = entry.path().extension() {
+                                                if let Some(ext_str) = extension.to_str() {
+                                                    let ext_lower = ext_str.to_lowercase();
+                                                    if matches!(ext_lower.as_str(), "jpg" | "jpeg") {
+                                                        root_node.images.push(entry.file_name());
+                                                    }
                                                 }
                                             }
                                         }
+                                    } else {
+                                        // Silently ignore metadata errors
                                     }
-                                } else {
-                                    // Silently ignore metadata errors
                                 }
                             }
                         }
-                    }
 
-                    // Populate the image paths in correct traversal order
-                    self.image_paths = root_node.get_images_depth_first_current_priority(&path);
-                    
-                    self.kept_images.clear();
-                    self.discarded_count = 0;
-                    self.image_counter = 0;
-                    self.is_loading = true;
-                    
-                    self.images = Some(Box::new(root_node));
-                    
-                    self.is_loading = false;
+                        // Populate the image paths in correct traversal order
+                        self.image_paths = root_node.get_images_depth_first_current_priority(&path);
+                        
+                        self.kept_images.clear();
+                        self.discarded_count = 0;
+                        self.image_counter = 0;
+                        self.is_loading = true;
+                        
+                        self.images = Some(Box::new(root_node));
+                        
+                        // Load progress after setting working_path and images
+                        self.load_progress(&path);
+                        self.is_loading = false;
+                    }
                 }
-            }
+                if ui.button("📁 Copy Kept Images").clicked() {
+                    match self.copy_kept_images() {
+                        Ok(()) => {
+                            if let Some(working_path) = &self.working_path {
+                                let output_folder = std::path::PathBuf::from(working_path).join("kept_images");
+                                ui.label(format!("✅ {} images copied to: {}", self.kept_images.len(), output_folder.display()));
+                            }
+                        },
+                        Err(e) => {
+                            ui.label(format!("❌ Error copying images: {}", e));
+                        }
+                    }
+                }
+            });
 
             if let Some(picked_path) = &self.working_path {
                 ui.horizontal(|ui| {
                     ui.label("Picked folder:");
                     ui.monospace(picked_path.to_string_lossy().as_ref());
                 });
-                
                 // Display information about found images
                 if let Some(images_node) = &self.images {
                     let total_images = images_node.count_images();
                     ui.label(format!("Total images found: {} (Current queue: {})", total_images, self.image_paths.len()));
-                    
+                    // Show 'All images processed!' block if queue is empty
+                    if self.image_paths.is_empty() {
+                        self.texture = None; // Ensure no image is displayed
+                        ui.label("🎉 All images processed!");
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Kept: {}", self.kept_images.len()));
+                            ui.label(format!("Discarded: {}", self.discarded_count));
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("📁 Copy Kept Images").clicked() {
+                                match self.copy_kept_images() {
+                                    Ok(()) => {
+                                        if let Some(working_path) = &self.working_path {
+                                            let output_folder = std::path::PathBuf::from(working_path).join("kept_images");
+                                            ui.label(format!("✅ {} images copied to: {}", self.kept_images.len(), output_folder.display()));
+                                        }
+                                    },
+                                    Err(e) => {
+                                        ui.label(format!("❌ Error copying images: {}", e));
+                                    }
+                                }
+                            }
+                            if ui.button("🔄 Reset").clicked() {
+                                if let (Some(images_node), Some(working_path)) = (&self.images, &self.working_path) {
+                                    let path = std::path::PathBuf::from(working_path);
+                                    self.image_paths = images_node.get_images_depth_first_current_priority(&path);
+                                }
+                                self.kept_images.clear();
+                                self.discarded_count = 0;
+                                self.image_counter = 0;
+                            }
+                        });
+                    }
                 }
             }
 
@@ -426,29 +510,26 @@ impl eframe::App for MyApp {
                         // Drop the previous texture
                         self.texture = None;
                         self.image_counter += 1;
+                        self.save_progress(); // Save progress after each action
                         ctx.request_repaint();
                     }
 
                 } else {
                     // All images processed
+                    self.texture = None; // Ensure no image is displayed
                     ui.label("🎉 All images processed!");
                     ui.horizontal(|ui| {
                         ui.label(format!("Kept: {}", self.kept_images.len()));
                         ui.label(format!("Discarded: {}", self.discarded_count));
                     });
-                    
                     ui.add_space(10.0);
-                    
                     ui.horizontal(|ui| {
                         if ui.button("📁 Copy Kept Images").clicked() {
                             match self.copy_kept_images() {
                                 Ok(()) => {
-                                    // Show success message (you could add a toast notification here)
                                     if let Some(working_path) = &self.working_path {
                                         let output_folder = std::path::PathBuf::from(working_path).join("kept_images");
-                                        ui.label(format!("✅ {} images copied to: {}", 
-                                            self.kept_images.len(), 
-                                            output_folder.display()));
+                                        ui.label(format!("✅ {} images copied to: {}", self.kept_images.len(), output_folder.display()));
                                     }
                                 },
                                 Err(e) => {
@@ -456,14 +537,11 @@ impl eframe::App for MyApp {
                                 }
                             }
                         }
-                        
                         if ui.button("🔄 Reset").clicked() {
-                            // Rebuild image paths from the filesystem tree
                             if let (Some(images_node), Some(working_path)) = (&self.images, &self.working_path) {
                                 let path = std::path::PathBuf::from(working_path);
                                 self.image_paths = images_node.get_images_depth_first_current_priority(&path);
                             }
-                            
                             self.kept_images.clear();
                             self.discarded_count = 0;
                             self.image_counter = 0;
